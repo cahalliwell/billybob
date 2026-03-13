@@ -322,7 +322,17 @@ export function useRevenueCatController(appUserID, authReady) {
         setLastError(error);
         return { success: false, error };
       }
-      const resolved = resolveRevenueCatPackage(target, offerings);
+      let availableOfferings = offerings;
+      if (!availableOfferings) {
+        try {
+          availableOfferings = await Purchases.getOfferings();
+          setOfferings(availableOfferings);
+        } catch (offeringsError) {
+          console.log("RevenueCat offerings fetch during purchase error:", offeringsError?.message || offeringsError);
+        }
+      }
+
+      const resolved = resolveRevenueCatPackage(target, availableOfferings);
       const fallbackId = typeof target === "string" ? target : null;
       const targetId =
         resolved?.identifier ||
@@ -365,12 +375,13 @@ export function useRevenueCatController(appUserID, authReady) {
     }
     setBusyState({ busy: true, action: "restore", targetId: null });
     try {
-      const info = await Purchases.restorePurchases();
-      if (info) {
-        setCustomerInfo(info);
+      const restoredInfo = await Purchases.restorePurchases();
+      const latestInfo = (await Purchases.getCustomerInfo?.()) || restoredInfo;
+      if (latestInfo) {
+        setCustomerInfo(latestInfo);
       }
       setLastError(null);
-      return { success: true, result: info };
+      return { success: true, result: latestInfo || restoredInfo };
     } catch (error) {
       console.log("RevenueCat restore error:", error?.message || error);
       setLastError(error);

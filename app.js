@@ -2407,8 +2407,7 @@ function HomeScreen({ navigation, route }) {
   const [menuVisible, setMenuVisible] = useState(false);
   const isFocused = useIsFocused();
   const { session, profile, loadingProfile, signOut, refreshProfile } = useAuth();
-  const { premiumActive: premiumEntitlementActive, coreActive: coreEntitlementActive } =
-    useRevenueCat();
+  const { premiumActive: premiumEntitlementActive } = useRevenueCat();
   const {
     visible: guidanceVisible,
     hasSeenGuidance,
@@ -2428,14 +2427,8 @@ function HomeScreen({ navigation, route }) {
     : session?.user?.email || "Not set";
   const premiumStatusLabel = premiumEntitlementActive
     ? "Premium"
-    : coreEntitlementActive
+    : session?.user
     ? "Core"
-    : hasProfile
-    ? profile.subscription_tier === "premium" || profile.is_premium
-      ? "Premium"
-      : profile.subscription_tier === "core"
-      ? "Core"
-      : "Core"
     : "Guest";
 
   useEffect(() => {
@@ -2752,9 +2745,8 @@ const stylesHome = StyleSheet.create({
 
 // 🎴 Cast screen
 function CastScreen({ route, navigation }) {
-  const { isPremium } = useAuth();
-  const premiumMember = Boolean(isPremium);
   const { premiumPriceString, customerInfo } = useRevenueCat();
+  const premiumMember = canUsePremiumFeatures({ customerInfo });
   const startPremiumPurchase = usePremiumPurchaseFlow();
   const question = route.params?.question ?? null;
   const [all, setAll] = useState([]);
@@ -2933,9 +2925,8 @@ function CastScreen({ route, navigation }) {
 }
 
 function ManualCastingScreen({ route, navigation }) {
-  const { isPremium } = useAuth();
-  const premiumMember = Boolean(isPremium);
   const { premiumPriceString, customerInfo } = useRevenueCat();
+  const premiumMember = canUsePremiumFeatures({ customerInfo });
   const startPremiumPurchase = usePremiumPurchaseFlow();
   const question = route.params?.question ?? null;
   const [inputs, setInputs] = useState(["", "", "", "", "", ""]);
@@ -4020,7 +4011,7 @@ const wordCount = (text) => {
 
 function JournalDetailScreen({ route, navigation }) {
   const { id } = route.params || {};
-  const { session, isPremium: premiumStatus } = useAuth();
+  const { session } = useAuth();
   const userId = session?.user?.id;
   const { entries, updateEntryNote, setEntryAiSummary, fetchEntryAiSummary } =
     useJournal();
@@ -4039,7 +4030,6 @@ function JournalDetailScreen({ route, navigation }) {
   const [summaryExpanded, setSummaryExpanded] = useState(false);
   const premiumMember = canUseAIFeatures({
     customerInfo,
-    isPremiumFromProfile: Boolean(premiumStatus),
   });
   const [aiUsageCount, setAiUsageCount] = useState(0);
   const [aiUsageLoading, setAiUsageLoading] = useState(false);
@@ -4843,46 +4833,33 @@ const stylesGuide = StyleSheet.create({
 
 // 💎 Premium screen
 function PremiumScreen({ navigation }) {
-  const { isPremium: premiumStatus, subscriptionTier } = useAuth();
+  const { subscriptionTier } = useAuth();
   const {
     packages,
     premiumPriceString,
-    corePriceString,
-    purchasePackage,
     restorePurchases,
     loading: transactionLoading,
     activeAction,
     activeTargetId,
-    premiumActive,
-    coreActive,
     customerInfo,
   } = useRevenueCat();
-  const isPremiumMember = canUsePremiumFeatures({
-    customerInfo,
-    isPremiumFromProfile: Boolean(premiumStatus || premiumActive),
-  });
+  const isPremiumMember = canUsePremiumFeatures({ customerInfo });
   const startPremiumPurchase = usePremiumPurchaseFlow(
     "Welcome to Premium",
     "Your Premium access is now active. Enjoy the full experience!"
   );
   const currentTier = isPremiumMember
     ? "premium"
-    : coreActive || subscriptionTier === "core"
+    : subscriptionTier === "core"
     ? "core"
     : subscriptionTier || "core";
 
   const premiumPackageRef = packages?.premium;
-  const corePackageRef = packages?.core;
   const premiumPackageId =
     premiumPackageRef?.identifier ||
     premiumPackageRef?.packageIdentifier ||
     premiumPackageRef?.product?.identifier ||
     REVENUECAT_CONFIG.packageIds.premium;
-  const corePackageId =
-    corePackageRef?.identifier ||
-    corePackageRef?.packageIdentifier ||
-    corePackageRef?.product?.identifier ||
-    REVENUECAT_CONFIG.packageIds.core;
 
   const featureMatrix = [
     { label: "Complete hexagram library", core: true, premium: true },
@@ -4895,19 +4872,7 @@ function PremiumScreen({ navigation }) {
 
   const premiumPurchaseBusy =
     transactionLoading && activeAction === "purchase" && activeTargetId === premiumPackageId;
-  const corePurchaseBusy =
-    transactionLoading && activeAction === "purchase" && activeTargetId === corePackageId;
   const restoreBusy = transactionLoading && activeAction === "restore";
-
-  const handleCoreUnlock = useCallback(async () => {
-    const target = corePackageRef || REVENUECAT_CONFIG.packageIds.core;
-    const outcome = await purchasePackage(target);
-    notifyPurchaseOutcome(outcome, {
-      successTitle: "Core unlocked",
-      successMessage: "Core features are now available on your account.",
-    });
-    return outcome;
-  }, [corePackageRef, purchasePackage]);
 
   const handleRestore = useCallback(async () => {
     const outcome = await restorePurchases();
@@ -4918,10 +4883,7 @@ function PremiumScreen({ navigation }) {
   const premiumButtonLabel = premiumPriceString
     ? `Upgrade to Premium (${premiumPriceString})`
     : "Upgrade to Premium";
-  const coreButtonLabel = corePriceString
-    ? `Unlock Core (${corePriceString})`
-    : "Unlock Core";
-  const corePriceLabel = corePriceString || "Loading price…";
+  const corePriceLabel = "Included with app purchase";
   const premiumPriceLabel = premiumPriceString || "Loading price…";
 
   return (
@@ -4954,17 +4916,9 @@ function PremiumScreen({ navigation }) {
                     <Text style={stylesPremium.badgeText}>Current plan</Text>
                   </View>
                 ) : null}
-                {!isPremiumMember && !coreActive ? (
-                  <GoldButton
-                    full
-                    kind="secondary"
-                    onPress={handleCoreUnlock}
-                    loading={corePurchaseBusy}
-                    icon={<Ionicons name="shield-checkmark-outline" size={18} color={palette.gold} />}
-                  >
-                    {coreButtonLabel}
-                  </GoldButton>
-                ) : null}
+                <Text style={stylesPremium.coreIncludedHint}>
+                  Core is already available from your paid Google Play app purchase.
+                </Text>
               </View>
               <View
                 style={[
@@ -5134,6 +5088,13 @@ const stylesPremium = StyleSheet.create({
     fontSize: 14,
     color: palette.ink,
     lineHeight: 20,
+  },
+  coreIncludedHint: {
+    marginTop: theme.space(1),
+    fontFamily: fonts.body,
+    fontSize: 12,
+    color: palette.inkMuted,
+    lineHeight: 18,
   },
   badge: {
     position: "absolute",
@@ -5626,23 +5587,14 @@ export default function App() {
 
   const revenueCatValue = useRevenueCatController(session?.user?.id ?? null, authReady);
 
-  const premiumStatus = useMemo(
-    () =>
-      revenueCatValue?.premiumActive ||
-      profile?.subscription_tier === "premium" ||
-      profile?.is_premium,
-    [
-      profile?.is_premium,
-      profile?.subscription_tier,
-      revenueCatValue?.premiumActive,
-    ]
-  );
+  const premiumStatus = useMemo(() => Boolean(revenueCatValue?.premiumActive), [
+    revenueCatValue?.premiumActive,
+  ]);
 
   const resolvedSubscriptionTier = useMemo(() => {
     if (revenueCatValue?.premiumActive) return "premium";
-    if (revenueCatValue?.coreActive) return "core";
-    return profile?.subscription_tier ?? null;
-  }, [profile?.subscription_tier, revenueCatValue?.coreActive, revenueCatValue?.premiumActive]);
+    return "core";
+  }, [revenueCatValue?.premiumActive]);
 
   const authValue = useMemo(
     () => ({
