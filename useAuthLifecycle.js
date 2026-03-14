@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Alert, Linking } from "react-native";
 import * as ExpoLinking from "expo-linking";
+import * as QueryParams from "expo-auth-session/build/QueryParams";
 
 export default function useAuthLifecycle({
   supabase,
@@ -10,22 +11,27 @@ export default function useAuthLifecycle({
 }) {
   useEffect(() => {
     let isMounted = true;
+
     console.log("🔐 Auth hydration: fetching initial session...");
+
     supabase.auth
       .getSession()
       .then(({ data }) => {
         if (!isMounted) return;
+
         console.log(
           "🔐 Auth hydration result:",
           data?.session ? "session restored" : "no session",
           data?.session?.user ? "user present" : "no user"
         );
+
         setSession(data?.session ?? null);
         setAuthReady(true);
         console.log("🔐 Auth hydration complete: authReady set to true");
       })
       .catch((error) => {
         console.log("Session fetch error:", error?.message || error);
+
         if (isMounted) {
           setAuthReady(true);
           console.log("🔐 Auth hydration failed: authReady set to true");
@@ -43,18 +49,17 @@ export default function useAuthLifecycle({
         "user?",
         !!newSession?.user
       );
-      // Prevent unwanted logout on app launch while still allowing explicit sign-out
+
       if (event === "SIGNED_OUT") {
         setSession(null);
       } else if (newSession !== null) {
         setSession(newSession);
       }
 
-      // Auth is now ready regardless of event type
       setAuthReady(true);
 
-      // Preserve password recovery logic
       if (event === "PASSWORD_RECOVERY") {
+        console.log("🔐 PASSWORD_RECOVERY event received");
         setPasswordResetRequested(true);
       }
     });
@@ -66,74 +71,71 @@ export default function useAuthLifecycle({
   }, [setAuthReady, setPasswordResetRequested, setSession, supabase]);
 
   useEffect(() => {
-    const isResetLink = (url) => {
-      if (!url) return false;
-      const parsed = ExpoLinking.parse(url);
-      const path = `${parsed?.path || ""}`;
-      const type = parsed?.queryParams?.type;
-      return path.includes("auth/reset") || type === "recovery" || url.includes("/auth/reset");
-    };
+    const createSessionFromUrl = async (url) => {
+      try {
+        const { params, errorCode } = QueryParams.getQueryParams(url);
 
-    const establishSessionFromLink = async (url) => {
-      const fromUrl = await supabase.auth.getSessionFromUrl({ url, storeSession: true });
+        if (errorCode) {
+          throw new Error(errorCode);
+        }
 
-      if (fromUrl?.data?.session) {
-        return { session: fromUrl.data.session, error: null };
+        const access_token = params?.access_token;
+        const refresh_token = params?.refresh_token;
+        const type = params?.type;
+
+        console.log("🔗 Parsed deep link params:", {
+          hasAccessToken: !!access_token,
+          hasRefreshToken: !!refresh_token,
+          type: type || null,
+        });
+
+        if (!access_token || !refresh_token) {
+          console.log("🔗 No auth tokens found in URL");
+          return null;
+        }
+
+        const { data, error } = await supabase.auth.setSession({
+          access_token,
+          refresh_token,
+        });
+
+        if (error) {
+          throw error;
+        }
+
+        console.log("✅ Recovery session established from URL");
+
+        if (data?.session) {
+          setSession(data.session);
+        }
+
+        if (type === "recovery") {
+          setPasswordResetRequested(true);
+        }
+
+        return data?.session ?? null;
+      } catch (error) {
+        console.log("❌ Failed to create session from URL:", error?.message || error);
+        Alert.alert(
+          "Password reset",
+          "We couldn't open that reset link. Please request a new one."
+        );
+        return null;
       }
-
-      const code = ExpoLinking.parse(url)?.queryParams?.code;
-      if (typeof code === "string" && code.length > 0) {
-        const exchanged = await supabase.auth.exchangeCodeForSession(code);
-        return {
-          session: exchanged?.data?.session ?? null,
-          error: exchanged?.error ?? fromUrl?.error ?? null,
-        };
-      }
-
-      return {
-        session: null,
-        error: fromUrl?.error ?? null,
-      };
     };
 
     const processResetLink = async (url) => {
-      if (!isResetLink(url)) return;
-      console.log("🔗 Incoming reset link:", url);
-      // Move into the reset flow immediately so the Reset screen is presented even while the session hydrates.
-      setPasswordResetRequested(true);
+      if (!url || !url.includes("auth/reset")) return;
 
-      try {
-        const { session, error } = await establishSessionFromLink(url);
-
-        if (error || !session) {
-          console.log("❌ Supabase password recovery failed:", error?.message || "missing session");
-          setPasswordResetRequested(false);
-          Alert.alert(
-            "Password reset",
-            "We couldn't open that link. Please request a new reset email."
-          );
-          return;
-        }
-
-        setSession(session);
-        console.log("✅ Supabase password recovery session established");
-      } catch (error) {
-        console.log("❌ Supabase password recovery failed:", error?.message || error);
-        setPasswordResetRequested(false);
-        Alert.alert(
-          "Password reset",
-          "We couldn't open that link. Please request a new reset email."
-        );
-      }
+      console.log("🔗 Reset link received:", url);
+      await createSessionFromUrl(url);
     };
 
     const processAuthCallbackLink = async (url) => {
       if (!url || !url.includes("auth/callback")) return;
-      console.log("🔗 Handling auth callback link:", url);
-      const { error } = await supabase.auth.getSessionFromUrl({ url, storeSession: true });
-      if (error) {
-        console.log("Auth callback link error:", error?.message || error);
-      }
+
+      console.log("🔗 Auth callback link received:", url);
+      await createSessionFromUrl(url);
     };
 
     const sub = Linking.addEventListener("url", async ({ url }) => {
@@ -144,6 +146,7 @@ export default function useAuthLifecycle({
     const resolveInitialUrl = async () => {
       try {
         const initialUrl = await ExpoLinking.getInitialURL();
+
         if (initialUrl) {
           console.log("🔗 Initial link:", initialUrl);
           await processResetLink(initialUrl);
