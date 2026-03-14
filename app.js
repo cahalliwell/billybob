@@ -79,7 +79,6 @@ import {
   REVENUECAT_CONFIG,
   RevenueCatContext,
   defaultRevenueCatState,
-  notifyPurchaseOutcome,
   notifyRestoreOutcome,
   usePremiumPurchaseFlow,
   useRevenueCat,
@@ -4859,7 +4858,7 @@ function PremiumScreen({ navigation }) {
     premiumPackageRef?.identifier ||
     premiumPackageRef?.packageIdentifier ||
     premiumPackageRef?.product?.identifier ||
-    REVENUECAT_CONFIG.packageIds.premium;
+    REVENUECAT_CONFIG.packageId;
 
   const featureMatrix = [
     { label: "Complete hexagram library", core: true, premium: true },

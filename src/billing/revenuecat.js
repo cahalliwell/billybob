@@ -3,7 +3,6 @@ import { Alert } from "react-native";
 import {
   getActiveEntitlementIds,
   getRevenueCatApiKey,
-  hasCoreEntitlement,
   hasPremiumAccess,
   REVENUECAT_CONFIG,
 } from "./entitlements";
@@ -25,9 +24,7 @@ const attachRevenueCatModule = (maybeModule) => {
   if (!maybeModule) return null;
   const resolved = maybeModule?.default || maybeModule;
   if (!resolved) return null;
-  if (Purchases === resolved) {
-    return resolved;
-  }
+  if (Purchases === resolved) return resolved;
   Purchases = resolved;
   PurchasesLogLevel =
     resolved?.LOG_LEVEL || resolved?.LogLevel || resolved?.LOG_LEVELS || PurchasesLogLevel;
@@ -71,50 +68,40 @@ if (!Purchases) {
   console.log("RevenueCat SDK unavailable: purchases features are disabled by default.");
 }
 
-const collectAllPackages = (offerings) => {
-  if (!offerings) return [];
-  const all = [];
-  const preferredOffering = REVENUECAT_CONFIG.offeringId
-    ? offerings?.all?.[REVENUECAT_CONFIG.offeringId]
-    : null;
-
-  if (preferredOffering?.availablePackages?.length) {
-    all.push(...preferredOffering.availablePackages);
-  }
-
-  const current = offerings.current;
-  if (current?.availablePackages?.length) {
-    all.push(...current.availablePackages);
-  }
-
-  const others = offerings.all || {};
-  Object.values(others).forEach((offering) => {
-    if (offering?.availablePackages?.length) {
-      offering.availablePackages.forEach((pkg) => all.push(pkg));
-    }
-  });
-
-  return all;
+const getPreferredOffering = (offerings) => {
+  if (!offerings) return null;
+  return offerings?.all?.[REVENUECAT_CONFIG.offeringId] || offerings?.current || null;
 };
 
 const resolveRevenueCatPackage = (packageOrId, offerings) => {
-  if (!packageOrId) return null;
-  if (packageOrId?.identifier && packageOrId?.product) {
-    return packageOrId;
-  }
+  if (!packageOrId || !offerings) return null;
+  if (packageOrId?.identifier && packageOrId?.product) return packageOrId;
+
   const identifier =
     typeof packageOrId === "string"
       ? packageOrId
       : packageOrId?.identifier || packageOrId?.packageIdentifier || packageOrId?.product?.identifier;
   if (!identifier) return null;
-  const allPackages = collectAllPackages(offerings);
-  if (!allPackages.length) return null;
-  return (
-    allPackages.find((pkg) => {
+
+  const preferredOffering = getPreferredOffering(offerings);
+  const preferredPackages = preferredOffering?.availablePackages || [];
+  const preferredMatch = preferredPackages.find((pkg) => {
+    const identifiers = [pkg?.identifier, pkg?.packageIdentifier, pkg?.product?.identifier].filter(Boolean);
+    return identifiers.includes(identifier);
+  });
+  if (preferredMatch) return preferredMatch;
+
+  const allOfferings = offerings?.all || {};
+  for (const offering of Object.values(allOfferings)) {
+    const packages = offering?.availablePackages || [];
+    const match = packages.find((pkg) => {
       const identifiers = [pkg?.identifier, pkg?.packageIdentifier, pkg?.product?.identifier].filter(Boolean);
-      return identifiers.some((value) => value === identifier);
-    }) || null
-  );
+      return identifiers.includes(identifier);
+    });
+    if (match) return match;
+  }
+
+  return null;
 };
 
 const shouldTreatAsCancellation = (error) => {
@@ -160,14 +147,12 @@ export const defaultRevenueCatState = {
   activeAction: null,
   activeTargetId: null,
   offerings: null,
-  packages: { premium: null, core: null },
+  packages: { premium: null },
   premiumPriceString: "",
-  corePriceString: "",
   purchasePackage: async () => ({ success: false, error: new Error("Purchases unavailable") }),
   restorePurchases: async () => ({ success: false, error: new Error("Purchases unavailable") }),
   refreshOfferings: async () => null,
   premiumActive: false,
-  coreActive: false,
   activeEntitlementIds: [],
   customerInfo: null,
   lastError: null,
@@ -187,12 +172,20 @@ export function useRevenueCatController(appUserID, authReady) {
   const revenueCatApiKey = useMemo(() => getRevenueCatApiKey(), []);
 
   useEffect(() => {
-    if (!Purchases || !revenueCatApiKey) {
+    if (!Purchases) return;
+
+    if (!revenueCatApiKey) {
+      const error = new Error(
+        "RevenueCat API key missing. Set EXPO_PUBLIC_REVENUECAT_ANDROID_KEY (and EXPO_PUBLIC_REVENUECAT_IOS_KEY for iOS)."
+      );
+      setConfigured(false);
+      setLastError(error);
+      console.log("[RevenueCat] Configuration skipped: missing public SDK key.");
       return;
     }
-    if (configureKeyRef.current === revenueCatApiKey || configuringRef.current) {
-      return;
-    }
+
+    if (configureKeyRef.current === revenueCatApiKey || configuringRef.current) return;
+
     configuringRef.current = true;
     let cancelled = false;
 
@@ -201,30 +194,26 @@ export function useRevenueCatController(appUserID, authReady) {
         if (Purchases.setLogLevel && PurchasesLogLevel?.WARN != null) {
           Purchases.setLogLevel(PurchasesLogLevel.WARN);
         }
+
         await Purchases.configure({ apiKey: revenueCatApiKey });
         if (cancelled) return;
+
         configureKeyRef.current = revenueCatApiKey;
         setConfigured(true);
         setLastError(null);
-        try {
-          const info = await Purchases.getCustomerInfo();
-          if (!cancelled) {
-            setCustomerInfo(info);
-          }
-        } catch (infoError) {
-          if (!cancelled) {
-            setLastError(infoError);
-          }
+        console.log("[RevenueCat] Configured successfully.");
+
+        const info = await Purchases.getCustomerInfo();
+        if (!cancelled && info) {
+          setCustomerInfo(info);
         }
-        try {
-          const nextOfferings = await Purchases.getOfferings();
-          if (!cancelled) {
-            setOfferings(nextOfferings);
-          }
-        } catch (offeringsError) {
-          if (!cancelled) {
-            setLastError(offeringsError);
-          }
+
+        const nextOfferings = await Purchases.getOfferings();
+        if (!cancelled) {
+          setOfferings(nextOfferings);
+          const packageCount =
+            nextOfferings?.all?.[REVENUECAT_CONFIG.offeringId]?.availablePackages?.length || 0;
+          console.log("[RevenueCat] Offerings loaded:", packageCount > 0);
         }
       } catch (error) {
         console.log("RevenueCat configure error:", error?.message || error);
@@ -255,15 +244,9 @@ export function useRevenueCatController(appUserID, authReady) {
   }, [revenueCatApiKey]);
 
   useEffect(() => {
-    if (!Purchases || !isConfigured || !authReady) {
-      return;
-    }
-    if (appUserID && currentUserRef.current === appUserID) {
-      return;
-    }
-    if (!appUserID && !currentUserRef.current) {
-      return;
-    }
+    if (!Purchases || !isConfigured || !authReady) return;
+    if (appUserID && currentUserRef.current === appUserID) return;
+    if (!appUserID && !currentUserRef.current) return;
 
     let cancelled = false;
 
@@ -274,9 +257,7 @@ export function useRevenueCatController(appUserID, authReady) {
           if (cancelled) return;
           currentUserRef.current = appUserID;
           const info = result?.customerInfo || result;
-          if (info) {
-            setCustomerInfo(info);
-          }
+          if (info) setCustomerInfo(info);
         } else {
           const info = await Purchases.logOut();
           if (cancelled) return;
@@ -286,9 +267,7 @@ export function useRevenueCatController(appUserID, authReady) {
         setLastError(null);
       } catch (error) {
         console.log("RevenueCat identity sync error:", error?.message || error);
-        if (!cancelled) {
-          setLastError(error);
-        }
+        if (!cancelled) setLastError(error);
       }
     };
 
@@ -300,13 +279,13 @@ export function useRevenueCatController(appUserID, authReady) {
   }, [appUserID, authReady, isConfigured]);
 
   const refreshOfferings = useCallback(async () => {
-    if (!Purchases || !isConfigured) {
-      return null;
-    }
+    if (!Purchases || !isConfigured) return null;
     try {
       const nextOfferings = await Purchases.getOfferings();
       setOfferings(nextOfferings);
       setLastError(null);
+      const packageCount = nextOfferings?.all?.[REVENUECAT_CONFIG.offeringId]?.availablePackages?.length || 0;
+      console.log("[RevenueCat] Offerings loaded:", packageCount > 0);
       return nextOfferings;
     } catch (error) {
       console.log("RevenueCat offerings error:", error?.message || error);
@@ -322,35 +301,36 @@ export function useRevenueCatController(appUserID, authReady) {
         setLastError(error);
         return { success: false, error };
       }
+
       let availableOfferings = offerings;
       if (!availableOfferings) {
         try {
           availableOfferings = await Purchases.getOfferings();
           setOfferings(availableOfferings);
         } catch (offeringsError) {
-          console.log("RevenueCat offerings fetch during purchase error:", offeringsError?.message || offeringsError);
+          console.log(
+            "RevenueCat offerings fetch during purchase error:",
+            offeringsError?.message || offeringsError
+          );
         }
       }
 
       const resolved = resolveRevenueCatPackage(target, availableOfferings);
       const fallbackId = typeof target === "string" ? target : null;
       const targetId =
-        resolved?.identifier ||
-        resolved?.packageIdentifier ||
-        resolved?.product?.identifier ||
-        fallbackId;
+        resolved?.identifier || resolved?.packageIdentifier || resolved?.product?.identifier || fallbackId;
+
       if (!resolved) {
         const error = new Error("Purchase options are unavailable. Please refresh and try again.");
         setLastError(error);
         return { success: false, error };
       }
+
       setBusyState({ busy: true, action: "purchase", targetId });
       try {
         const result = await Purchases.purchasePackage(resolved);
         const info = result?.customerInfo || result;
-        if (info) {
-          setCustomerInfo(info);
-        }
+        if (info) setCustomerInfo(info);
         setLastError(null);
         return { success: true, result };
       } catch (error) {
@@ -373,13 +353,12 @@ export function useRevenueCatController(appUserID, authReady) {
       setLastError(error);
       return { success: false, error };
     }
+
     setBusyState({ busy: true, action: "restore", targetId: null });
     try {
       const restoredInfo = await Purchases.restorePurchases();
       const latestInfo = (await Purchases.getCustomerInfo?.()) || restoredInfo;
-      if (latestInfo) {
-        setCustomerInfo(latestInfo);
-      }
+      if (latestInfo) setCustomerInfo(latestInfo);
       setLastError(null);
       return { success: true, result: latestInfo || restoredInfo };
     } catch (error) {
@@ -394,29 +373,27 @@ export function useRevenueCatController(appUserID, authReady) {
   const activeEntitlementIds = useMemo(() => getActiveEntitlementIds(customerInfo), [customerInfo]);
 
   const premiumPackage = useMemo(
-    () => resolveRevenueCatPackage(REVENUECAT_CONFIG.packageIds.premium, offerings),
-    [offerings]
-  );
-  const corePackage = useMemo(
-    () => resolveRevenueCatPackage(REVENUECAT_CONFIG.packageIds.core, offerings),
+    () => resolveRevenueCatPackage(REVENUECAT_CONFIG.packageId, offerings),
     [offerings]
   );
 
-  const contextValue = useMemo(
+  useEffect(() => {
+    console.log("[RevenueCat] Premium entitlement active:", hasPremiumAccess(customerInfo));
+  }, [customerInfo]);
+
+  return useMemo(
     () => ({
       ready: isConfigured,
       loading: busyState.busy,
       activeAction: busyState.action,
       activeTargetId: busyState.targetId,
       offerings,
-      packages: { premium: premiumPackage, core: corePackage },
+      packages: { premium: premiumPackage },
       premiumPriceString: premiumPackage?.product?.priceString || "",
-      corePriceString: corePackage?.product?.priceString || "",
       purchasePackage,
       restorePurchases,
       refreshOfferings,
       premiumActive: hasPremiumAccess(customerInfo),
-      coreActive: hasCoreEntitlement(customerInfo),
       activeEntitlementIds,
       customerInfo,
       lastError,
@@ -428,7 +405,6 @@ export function useRevenueCatController(appUserID, authReady) {
       busyState.targetId,
       offerings,
       premiumPackage,
-      corePackage,
       purchasePackage,
       restorePurchases,
       refreshOfferings,
@@ -437,6 +413,4 @@ export function useRevenueCatController(appUserID, authReady) {
       lastError,
     ]
   );
-
-  return contextValue;
 }
